@@ -1,0 +1,287 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>A* Pathfinding Robot Controller</title>
+    <style>
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            display: flex;
+            justify-content: center;
+            align-items: flex-start;
+            gap: 20px;
+            padding: 20px;
+            background-color: #f4f7f6;
+        }
+        .container {
+            display: flex;
+            flex-direction: column;
+            gap: 15px;
+            background-color: white;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+        }
+        #pathCanvas {
+            border: 2px solid #dee2e6;
+            border-radius: 4px;
+        }
+        .controls {
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+        }
+        button {
+            padding: 12px 20px;
+            font-size: 16px;
+            cursor: pointer;
+            border: none;
+            border-radius: 5px;
+            color: white;
+            background-color: #007bff;
+            transition: background-color 0.3s ease;
+        }
+        button:hover {
+            background-color: #0056b3;
+        }
+        button:disabled {
+            background-color: #6c757d;
+            cursor: not-allowed;
+        }
+        #status {
+            font-weight: 500;
+            color: #495057;
+            text-align: center;
+            min-height: 20px;
+        }
+    </style>
+</head>
+<body>
+
+    <div class="container">
+        <canvas id="pathCanvas" width="650" height="600"></canvas>
+        <div class="controls">
+            <button id="findPathBtn">🚀 Find Path and Move Robot</button>
+            <div id="status">Ready. Press the button to start.</div>
+        </div>
+    </div>
+
+    <script>
+        // --- CONFIGURATION ---
+        const API_BASE_URL = 'http://localhost:5001';
+        const GRID_RESOLUTION = 10; // Finer grid for better accuracy
+        const ROBOT_RADIUS = 18;
+        const OBSTACLE_SAFETY_MARGIN = 5; // Extra buffer space
+        const ROBOT_SPEED_PX_PER_SEC = 120; // Estimated robot speed for timing
+
+        // --- DOM ELEMENTS ---
+        const canvas = document.getElementById('pathCanvas');
+        const ctx = canvas.getContext('2d');
+        const findPathBtn = document.getElementById('findPathBtn');
+        const statusEl = document.getElementById('status');
+
+        // --- STATE - MIRRORING THE SIMULATOR'S INITIAL STATE ---
+        // This list MUST match the 'obstacles' array in your simulator.html.
+        const obstacles = [
+            { x: 150, y: 120, size: 25 },
+            { x: 450, y: 180, size: 25 },
+            { x: 220, y: 300, size: 25 },
+            { x: 380, y: 380, size: 25 },
+            { x: 100, y: 450, size: 25 },
+            { x: 500, y: 100, size: 25 },
+            { x: 280, y: 220, size: 25 },
+            { x: 420, y: 320, size: 25 }
+        ];
+        // This goal position MUST match the simulator's goal.
+        const goal = { x: 550, y: 80, size: 15 };
+        // This robot position MUST match the simulator's starting robot position.
+        const robot = { x: 320, y: 300, size: 18 };
+
+        // --- A* ALGORITHM IMPLEMENTATION ---
+        class Node {
+            constructor(x, y, parent = null) {
+                this.x = x; this.y = y; this.parent = parent;
+                this.g = 0; this.h = 0; this.f = 0;
+                this.isObstacle = false;
+            }
+        }
+
+        function heuristic(a, b) {
+            const dx = Math.abs(a.x - b.x); const dy = Math.abs(a.y - b.y);
+            return (dx + dy) + (Math.SQRT2 - 2) * Math.min(dx, dy);
+        }
+
+        function aStar(startNode, endNode, grid) {
+            const openList = [startNode];
+            const closedSet = new Set();
+            while (openList.length > 0) {
+                openList.sort((a, b) => a.f - b.f);
+                const currentNode = openList.shift();
+                if (currentNode.x === endNode.x && currentNode.y === endNode.y) {
+                    let path = []; let temp = currentNode;
+                    while (temp) { path.push(temp); temp = temp.parent; }
+                    return path.reverse();
+                }
+                closedSet.add(`${currentNode.x},${currentNode.y}`);
+                for (let dx = -1; dx <= 1; dx++) {
+                    for (let dy = -1; dy <= 1; dy++) {
+                        if (dx === 0 && dy === 0) continue;
+                        const newX = currentNode.x + dx; const newY = currentNode.y + dy;
+                        if (!grid[newX] || !grid[newX][newY] || grid[newX][newY].isObstacle || closedSet.has(`${newX},${newY}`)) continue;
+                        const neighbor = grid[newX][newY];
+                        const gScore = currentNode.g + (dx !== 0 && dy !== 0 ? Math.SQRT2 : 1);
+                        const inOpenList = openList.includes(neighbor);
+                        if (gScore < neighbor.g || !inOpenList) {
+                            neighbor.g = gScore; neighbor.h = heuristic(neighbor, endNode);
+                            neighbor.f = neighbor.g + neighbor.h; neighbor.parent = currentNode;
+                            if (!inOpenList) openList.push(neighbor);
+                        }
+                    }
+                }
+            }
+            return [];
+        }
+
+        // --- PATH AND MOVEMENT LOGIC ---
+        function simplifyPath(path, grid) {
+            if (path.length < 3) return path;
+            const newPath = [path[0]];
+            let lastKeyNodeIndex = 0;
+            for (let i = 2; i < path.length; i++) {
+                if (!isLineOfSightClear(grid, path[lastKeyNodeIndex], path[i])) {
+                    newPath.push(path[i - 1]);
+                    lastKeyNodeIndex = i - 1;
+                }
+            }
+            newPath.push(path[path.length - 1]);
+            return newPath;
+        }
+
+        function isLineOfSightClear(grid, startNode, endNode) {
+            let x0 = startNode.x, y0 = startNode.y;
+            const x1 = endNode.x, y1 = endNode.y;
+            const dx = Math.abs(x1 - x0), dy = Math.abs(y1 - y0);
+            const sx = (x0 < x1) ? 1 : -1, sy = (y0 < y1) ? 1 : -1;
+            let err = dx - dy;
+            while (true) {
+                if (grid[x0]?.[y0]?.isObstacle) return false;
+                if ((x0 === x1) && (y0 === y1)) break;
+                const e2 = 2 * err;
+                if (e2 > -dy) { err -= dy; x0 += sx; }
+                if (e2 < dx) { err += dx; y0 += sy; }
+            }
+            return true;
+        }
+
+        async function moveRobotAlongPath(path) {
+            statusEl.innerText = 'Executing path...';
+            for (let i = 0; i < path.length; i++) {
+                const node = path[i];
+                const targetX = node.x * GRID_RESOLUTION + GRID_RESOLUTION / 2;
+                const targetY = node.y * GRID_RESOLUTION + GRID_RESOLUTION / 2;
+                statusEl.innerText = `Moving to waypoint ${i + 1}/${path.length}...`;
+                try {
+                    await fetch(`${API_BASE_URL}/move`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ x: targetX, y: targetY })
+                    });
+                } catch (e) {
+                    statusEl.innerText = 'Error: Connection to server failed.';
+                    return; // Stop execution if server connection is lost
+                }
+                if (i < path.length - 1) {
+                    const nextNode = path[i+1];
+                    const nextX = nextNode.x * GRID_RESOLUTION + GRID_RESOLUTION / 2;
+                    const nextY = nextNode.y * GRID_RESOLUTION + GRID_RESOLUTION / 2;
+                    const distance = Math.sqrt(Math.pow(nextX - targetX, 2) + Math.pow(nextY - targetY, 2));
+                    const waitTime = (distance / ROBOT_SPEED_PX_PER_SEC) * 1000;
+                    await new Promise(resolve => setTimeout(resolve, waitTime));
+                }
+            }
+            statusEl.innerText = '✅ Path execution complete.';
+        }
+        
+        // --- DRAWING AND VISUALIZATION ---
+        function visualize() {
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            // Draw original obstacles
+            ctx.fillStyle = '#343a40'; // Dark gray for obstacles
+            obstacles.forEach(obs => {
+                ctx.fillRect(obs.x - obs.size / 2, obs.y - obs.size / 2, obs.size, obs.size);
+            });
+            // Draw Goal and Robot
+            ctx.fillStyle = '#28a745'; // Green for goal
+            ctx.beginPath();
+            ctx.arc(goal.x, goal.y, goal.size, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.fillStyle = '#dc3545'; // Red for robot
+            ctx.beginPath();
+            ctx.arc(robot.x, robot.y, robot.size, 0, Math.PI * 2);
+            ctx.fill();
+        }
+
+        function drawPath(path, color, lineWidth = 2) {
+            if (path.length === 0) return;
+            ctx.strokeStyle = color;
+            ctx.lineWidth = lineWidth;
+            ctx.beginPath();
+            ctx.moveTo(path[0].x * GRID_RESOLUTION, path[0].y * GRID_RESOLUTION);
+            for (let i = 1; i < path.length; i++) {
+                ctx.lineTo(path[i].x * GRID_RESOLUTION, path[i].y * GRID_RESOLUTION);
+            }
+            ctx.stroke();
+        }
+
+        // --- MAIN EXECUTION ---
+        findPathBtn.addEventListener('click', async () => {
+            findPathBtn.disabled = true;
+            visualize(); // Redraw the initial state
+            statusEl.innerText = 'Calculating path with A*...';
+
+            // 1. Create grid and inflate obstacles
+            const gridWidth = Math.ceil(canvas.width / GRID_RESOLUTION);
+            const gridHeight = Math.ceil(canvas.height / GRID_RESOLUTION);
+            const grid = Array.from({ length: gridWidth }, (_, x) => Array.from({ length: gridHeight }, (_, y) => new Node(x, y)));
+            const clearanceRadius = ROBOT_RADIUS + OBSTACLE_SAFETY_MARGIN;
+
+            for (const obs of obstacles) {
+                for (let x = 0; x < gridWidth; x++) {
+                    for (let y = 0; y < gridHeight; y++) {
+                        const gridX_px = x * GRID_RESOLUTION + GRID_RESOLUTION / 2;
+                        const gridY_px = y * GRID_RESOLUTION + GRID_RESOLUTION / 2;
+                        const dist = Math.sqrt(Math.pow(gridX_px - obs.x, 2) + Math.pow(gridY_px - obs.y, 2));
+                        if (dist < clearanceRadius + (obs.size / 2)) {
+                            grid[x][y].isObstacle = true;
+                        }
+                    }
+                }
+            }
+
+            // 2. Define start/end nodes
+            const startNode = grid[Math.floor(robot.x / GRID_RESOLUTION)][Math.floor(robot.y / GRID_RESOLUTION)];
+            const endNode = grid[Math.floor(goal.x / GRID_RESOLUTION)][Math.floor(goal.y / GRID_RESOLUTION)];
+
+            // 3. Run A* and simplify path
+            await new Promise(resolve => setTimeout(resolve, 50)); // Allow UI to update
+            const rawPath = aStar(startNode, endNode, grid);
+            
+            if (rawPath.length > 0) {
+                statusEl.innerText = 'Path found. Simplifying...';
+                const simplifiedPath = simplifyPath(rawPath, grid);
+                
+                // 4. Visualize and execute
+                drawPath(simplifiedPath, '#007bff', 3);
+                await moveRobotAlongPath(simplifiedPath);
+            } else {
+                statusEl.innerText = '❌ No path found!';
+            }
+            findPathBtn.disabled = false;
+        });
+
+        // Initial draw on page load
+        visualize();
+    </script>
+</body>
+</html>
